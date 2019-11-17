@@ -28,7 +28,7 @@ All rights reserverd by S.Lang <universam@web.de>
 // !DEBUG 1
 
 // definitions go here
-MPU6050_Base accelgyro;
+MPU6050 accelgyro;
 OneWire *oneWire;
 DallasTemperature DS18B20;
 DeviceAddress tempDeviceAddress;
@@ -68,8 +68,8 @@ bool shouldSaveConfig = false;
 
 char my_token[TKIDSIZE * 2];
 char my_name[TKIDSIZE] = "iSpindel000";
-char my_server[TKIDSIZE];
-char my_url[URLSIZE];
+char my_server[DNSSIZE];
+char my_uri[DNSSIZE];
 char my_db[TKIDSIZE] = "ispindel";
 char my_username[TKIDSIZE];
 char my_password[TKIDSIZE];
@@ -84,7 +84,7 @@ uint32_t my_sleeptime = 15 * 60;
 uint16_t my_port = 80;
 uint32_t my_channel;
 float my_vfact = ADCDIVISOR;
-int16_t my_aX = UNINIT, my_aY = UNINIT, my_aZ = UNINIT;
+int16_t my_Offset[6];
 uint8_t my_tempscale = TEMP_CELSIUS;
 int8_t my_OWpin = -1;
 
@@ -126,12 +126,16 @@ void saveConfigCallback()
 
 void applyOffset()
 {
-  if (my_aX != UNINIT && my_aY != UNINIT && my_aZ != UNINIT)
+  if (my_Offset[0] != UNINIT && my_Offset[1] != UNINIT && my_Offset[2] != UNINIT)
   {
-    CONSOLELN(String("applying offsets: ") + my_aX + ":" + my_aY + ":" + my_aZ);
-    accelgyro.setXAccelOffset(my_aX);
-    accelgyro.setYAccelOffset(my_aY);
-    accelgyro.setZAccelOffset(my_aZ);
+    CONSOLELN(String("applying offsets: ") + my_Offset[0] + ":" + my_Offset[1] + ":" + my_Offset[2]);
+    accelgyro.setXAccelOffset(my_Offset[0]);
+    accelgyro.setYAccelOffset(my_Offset[1]);
+    accelgyro.setZAccelOffset(my_Offset[2]);
+    accelgyro.setXGyroOffset(my_Offset[3]);
+    accelgyro.setYGyroOffset(my_Offset[4]);
+    accelgyro.setZGyroOffset(my_Offset[5]);
+    delay(1);
 
     CONSOLELN(String("confirming offsets: ") + accelgyro.getXAccelOffset() + ":" + accelgyro.getYAccelOffset() + ":" + accelgyro.getZAccelOffset());
   }
@@ -168,14 +172,14 @@ bool readConfig()
       else
       {
         size_t size = configFile.size();
-        // Allocate a buffer to store contents of the file.
-        std::unique_ptr<char[]> buf(new char[size]);
-
-        configFile.readBytes(buf.get(), size);
-        DynamicJsonDocument doc(1024);
-        DeserializationError error = deserializeJson(doc, buf.get());
-
-        if (!error)
+        DynamicJsonDocument doc(size * 2);
+        DeserializationError error = deserializeJson(doc, configFile);
+        if (error)
+        {
+          CONSOLE(F("deserializeJson() failed: "));
+          CONSOLELN(error.c_str());
+        }
+        else
         {
           if (doc.containsKey("Name"))
             strcpy(my_name, doc["Name"]);
@@ -191,8 +195,8 @@ bool readConfig()
             my_port = doc["Port"];
           if (doc.containsKey("Channel"))
             my_channel = doc["Channel"];
-          if (doc.containsKey("URL"))
-            strcpy(my_url, doc["URL"]);
+          if (doc.containsKey("URI"))
+            strcpy(my_uri, doc["URI"]);
           if (doc.containsKey("DB"))
             strcpy(my_db, doc["DB"]);
           if (doc.containsKey("Username"))
@@ -215,14 +219,14 @@ bool readConfig()
             my_psk = (const char *)doc["PSK"];
           if (doc.containsKey("POLY"))
             strcpy(my_polynominal, doc["POLY"]);
-          if (doc.containsKey("aX"))
-            my_aX = doc["aX"];
-          if (doc.containsKey("aY"))
-            my_aY = doc["aY"];
-          if (doc.containsKey("aZ"))
-            my_aZ = doc["aZ"];
 
-          applyOffset();
+          if (doc.containsKey("Offset"))
+          {
+            for (size_t i = 0; i < (sizeof(my_Offset) / sizeof(*my_Offset)); i++)
+            {
+              my_Offset[i] = doc["Offset"][i];
+            }
+          }
 
           CONSOLELN(F("parsed config:"));
 #ifdef DEBUG
@@ -339,13 +343,13 @@ bool startConfiguration()
   WiFiManagerParameter custom_token("token", "Token", htmlencode(my_token).c_str(),
                                     TKIDSIZE * 2 * 2);
   WiFiManagerParameter custom_server("server", "Server Address",
-                                     my_server, TKIDSIZE);
+                                     my_server, DNSSIZE);
   WiFiManagerParameter custom_port("port", "Server Port",
                                    String(my_port).c_str(), TKIDSIZE,
                                    TYPE_NUMBER);
   WiFiManagerParameter custom_channel("channel", "Channelnumber",
                                       String(my_channel).c_str(), TKIDSIZE, TYPE_NUMBER);
-  WiFiManagerParameter custom_url("url", "Server URL", my_url, URLSIZE);
+  WiFiManagerParameter custom_url("uri", "Path / URI", my_uri, DNSSIZE);
   WiFiManagerParameter custom_db("db", "InfluxDB db", my_db, TKIDSIZE);
   WiFiManagerParameter custom_username("username", "Username", my_username, TKIDSIZE);
   WiFiManagerParameter custom_password("password", "Password", my_password, TKIDSIZE);
@@ -409,7 +413,7 @@ bool startConfiguration()
   my_port = String(custom_port.getValue()).toInt();
   my_channel = String(custom_channel.getValue()).toInt();
   my_tempscale = String(custom_tempscale.getValue()).toInt();
-  validateInput(custom_url.getValue(), my_url);
+  validateInput(custom_url.getValue(), my_uri);
 
   String tmp = custom_vfact.getValue();
   tmp.trim();
@@ -439,12 +443,11 @@ bool formatSpiffs()
   return SPIFFS.begin();
 }
 
-bool saveConfig(int16_t aX, int16_t aY, int16_t aZ)
+bool saveConfig(int16_t Offset[6])
 {
-  my_aX = aX;
-  my_aY = aY;
-  my_aZ = aZ;
-  CONSOLELN(String("new offsets: ") + my_aX + ":" + my_aY + ":" + my_aZ);
+  std::copy(Offset, Offset + 6, my_Offset);
+  CONSOLELN(String("new offsets: ") + Offset[0] + ":" + Offset[1] + ":" + Offset[2]);
+  CONSOLELN(String("confirming offsets: ") + accelgyro.getXAccelOffset() + ":" + accelgyro.getYAccelOffset() + ":" + accelgyro.getZAccelOffset());
 
   return saveConfig();
 }
@@ -464,7 +467,7 @@ bool saveConfig()
     }
   }
 
-  DynamicJsonDocument doc(JSON_OBJECT_SIZE(23));
+  DynamicJsonDocument doc(2048);
 
   doc["Name"] = my_name;
   doc["Token"] = my_token;
@@ -475,7 +478,7 @@ bool saveConfig()
   doc["API"] = my_api;
   doc["Port"] = my_port;
   doc["Channel"] = my_channel;
-  doc["URL"] = my_url;
+  doc["URI"] = my_uri;
   doc["DB"] = my_db;
   doc["Username"] = my_username;
   doc["Password"] = my_password;
@@ -484,15 +487,15 @@ bool saveConfig()
   doc["Vfact"] = my_vfact;
   doc["TS"] = my_tempscale;
   doc["OWpin"] = my_OWpin;
-
-  // Store current Wifi credentials
+  doc["POLY"] = my_polynominal;
   doc["SSID"] = WiFi.SSID();
   doc["PSK"] = WiFi.psk();
 
-  doc["POLY"] = my_polynominal;
-  doc["aX"] = my_aX;
-  doc["aY"] = my_aY;
-  doc["aZ"] = my_aZ;
+  JsonArray array = doc.createNestedArray("Offset");
+  for (auto &&i : my_Offset)
+  {
+    array.add(i);
+  }
 
   File configFile = SPIFFS.open(CFGFILE, "w");
   if (!configFile)
@@ -511,7 +514,7 @@ bool saveConfig()
     configFile.close();
     SPIFFS.gc();
     SPIFFS.end();
-    CONSOLELN(F("saved successfully"));
+    CONSOLELN(F("\nsaved successfully"));
     return true;
   }
 }
@@ -634,7 +637,7 @@ bool uploadData(uint8_t service)
     if (service == DTHTTP)
     {
       CONSOLELN(F("\ncalling HTTP"));
-      return sender.sendGenericPost(my_server, my_url, my_port);
+      return sender.sendGenericPost(my_server, my_uri, my_port);
     }
     else if (service == DTCraftBeerPi)
     {
@@ -798,6 +801,7 @@ void initAccel()
   Wire.setClock(100000);
   Wire.setClockStretchLimit(2 * 230);
 
+  testAccel();
   // init the Accel
   accelgyro.initialize();
   accelgyro.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);
@@ -813,7 +817,7 @@ void initAccel()
   accelgyro.setInterruptDrive(1); // Open drain
   accelgyro.setRate(17);
   accelgyro.setIntDataReadyEnabled(true);
-  testAccel();
+  applyOffset();
 }
 
 float calculateTilt()
