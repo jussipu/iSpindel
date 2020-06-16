@@ -172,7 +172,7 @@ bool readConfig()
       else
       {
         size_t size = configFile.size();
-        DynamicJsonDocument doc(size * 2);
+        DynamicJsonDocument doc(size * 3);
         DeserializationError error = deserializeJson(doc, configFile);
         if (error)
         {
@@ -419,7 +419,7 @@ bool startConfiguration()
   tmp.trim();
   tmp.replace(',', '.');
   my_vfact = tmp.toFloat();
-  if (my_vfact < ADCDIVISOR * 0.8 || my_vfact > ADCDIVISOR * 1.2)
+  if (my_vfact < ADCDIVISOR * 0.8 || my_vfact > ADCDIVISOR * 1.25)
     my_vfact = ADCDIVISOR;
 
   // save the custom parameters to FS
@@ -682,6 +682,26 @@ bool uploadData(uint8_t service)
     return sender.sendTCONTROL(my_server, 4968);
   }
 #endif // DATABASESYSTEM ==
+
+#ifdef API_BLYNK
+  if (service == DTBLYNK)
+  {
+    String tempToSend = String( scaleTemperature( Temperatur ), 1 );
+    sender.add("20", tempToSend);           //send temperature without the unit to the graph first
+    String voltToSend = String(Volt, 2);
+    sender.add("30", voltToSend);           //send temperature without the unit to the graph first
+
+    tempToSend += "°";
+    tempToSend += tempScaleLabel();         // Add temperature unit to the String
+
+    sender.add("1", String(Tilt, 1)+"°");
+    sender.add("2", tempToSend);
+    sender.add("3", voltToSend+"V");
+    sender.add("4", String(Gravity, 2));
+    return sender.sendBlynk(my_token);
+  }
+#endif
+
   return false;
 }
 
@@ -1071,12 +1091,32 @@ bool isSafeMode(float _volt)
     return false;
 }
 
-void connectBackupCredentials()
+bool connectBackupCredentials()
 {
   WiFi.disconnect();
   WiFi.begin(my_ssid.c_str(), my_psk.c_str());
-  CONSOLELN(F("Rescue Wifi credentials"));
-  delay(100);
+  CONSOLELN(F("Rescued Wifi credentials"));
+
+  CONSOLE(F("   -> waited for "));
+  unsigned long startedAt = millis();
+  // int connRes = WiFi.waitForConnectResult();
+  uint8_t wait = 0;
+  while (WiFi.status() == WL_DISCONNECTED)
+  {
+    delay(200);
+    wait++;
+    if (wait > 50)
+      break;
+  }
+  auto waited = (millis() - startedAt);
+  CONSOLE(waited);
+  CONSOLE(F("ms, result "));
+  CONSOLELN(WiFi.status());
+
+  if (WiFi.status() == WL_DISCONNECTED)
+    return false;
+  else
+    return true;
 }
 
 void setup()
@@ -1240,7 +1280,7 @@ void setup()
     uint8_t wait = 0;
     while (WiFi.status() == WL_DISCONNECTED)
     {
-      delay(100);
+      delay(200);
       wait++;
       if (wait > 50)
         break;
@@ -1258,13 +1298,20 @@ void setup()
   }
   else
   {
-    connectBackupCredentials();
-    CONSOLELN(F("failed to connect"));
+    CONSOLELN(F("Failed to connect -> trying to restore connection..."));
+
+    if (connectBackupCredentials())
+      CONSOLE(F("   -> Connection restored!"));
+    else
+      CONSOLE(F("   -> Failed to restore connection..."));
   }
 
   // survive - 60min sleep time
   if (isSafeMode(Volt))
+  {
     my_sleeptime = EMERGENCYSLEEP;
+  }
+
   goodNight(my_sleeptime);
 }
 
